@@ -45,11 +45,18 @@ st.divider()
 # ==============================
 
 def converter_valor(valor):
-    """Replica ConverterValorParaNumero do VBA."""
+    """
+    Replica ConverterValorParaNumero do VBA.
+    Trata formato BR (1.234,56 ou R$ 1.234,56) e valores numéricos puros.
+    """
     try:
-        s = str(valor)
-        s = s.replace("R$", "").replace(" ", "").replace(".", "")
-        s = s.replace(",", ".")
+        if isinstance(valor, (int, float)):
+            return float(valor)
+        s = str(valor).strip().replace("R$", "").replace(" ", "")
+        if "," in s:
+            # Formato BR: ponto = milhar, vírgula = decimal
+            s = s.replace(".", "").replace(",", ".")
+        # Formato EN ou número puro: mantém como está
         return float(s)
     except Exception:
         return 0.0
@@ -204,7 +211,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("#### 📄 Arquivo FATURA")
-    st.caption("Colunas usadas: **A** = PAT · **B** = Tot Geral · **C** = Num Série")
+    st.caption("Colunas usadas: **B** = PAT · **D** = Tot Geral · **A** = Num Série")
     file_fatura = st.file_uploader("Selecione o arquivo da FATURA",
                                    type=["xlsx","xlsm","xls"], key="fatura")
 
@@ -224,7 +231,8 @@ if file_fatura and file_apex:
     with st.spinner("Comparando dados..."):
 
         df_fat_full  = pd.read_excel(file_fatura, header=0)
-        df_fatura_dest = df_fat_full.iloc[:, [0, 1, 2]].copy()
+        # FATURA: col B(idx1)=PAT, col D(idx3)=Tot Geral, col A(idx0)=Num Série
+        df_fatura_dest = df_fat_full.iloc[:, [1, 3, 0]].copy()
         df_fatura_dest.columns = ["PAT", "Tot Geral", "Num Série"]
 
         df_apex_full = pd.read_excel(file_apex, header=0)
