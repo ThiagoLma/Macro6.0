@@ -108,11 +108,14 @@ def comparar_fatura_apex(df_fatura, df_apex):
             dict_fatura[codigo] = converter_valor(valor)
 
     # Dicionário APEX  (col A=Tombo, col B=Vr Loc)
+    # Vr Loc vazio = 0 (conforme regra do negócio)
     dict_apex = {}
     for _, row in df_apex.iterrows():
         codigo = limpar_codigo(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
         if codigo and codigo not in ("", "nan"):
-            dict_apex[codigo] = converter_valor(row.iloc[1])
+            vr_loc = row.iloc[1]
+            valor_apex = 0.0 if pd.isna(vr_loc) or str(vr_loc).strip() in ("", "nan") else converter_valor(vr_loc)
+            dict_apex[codigo] = valor_apex
 
     # Comparação — mesma ordem do VBA
     resultado = []
@@ -211,7 +214,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("#### 📄 Arquivo FATURA")
-    st.caption("Colunas usadas: **B** = PAT · **D** = Tot Geral · **A** = Num Série")
+    st.caption("Colunas usadas: **B** = PAT · **E** = Tot Geral · **A** = Num Série")
     file_fatura = st.file_uploader("Selecione o arquivo da FATURA",
                                    type=["xlsx","xlsm","xls"], key="fatura")
 
@@ -232,7 +235,8 @@ if file_fatura and file_apex:
 
         df_fat_full  = pd.read_excel(file_fatura, header=0)
         # FATURA: col B(idx1)=PAT, col D(idx3)=Tot Geral, col A(idx0)=Num Série
-        df_fatura_dest = df_fat_full.iloc[:, [1, 3, 0]].copy()
+        # FATURA: col B(idx1)=PAT, col E(idx4)=Tot Geral, col A(idx0)=Num Série
+        df_fatura_dest = df_fat_full.iloc[:, [1, 4, 0]].copy()
         df_fatura_dest.columns = ["PAT", "Tot Geral", "Num Série"]
 
         df_apex_full = pd.read_excel(file_apex, header=0)
