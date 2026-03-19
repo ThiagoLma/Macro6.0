@@ -1,8 +1,10 @@
 import streamlit as st
 import pandas as pd
-from openpyxl import load_workbook
+import plotly.express as px
+from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 import io
+import re
 
 # ==============================
 # CONFIGURAÇÃO DA PÁGINA
@@ -30,143 +32,169 @@ div[data-testid="stMetric"] {
     border-radius: 8px;
     border: none;
 }
-.upload-box {
-    background: white;
-    border-radius: 12px;
-    padding: 16px;
-    box-shadow: 0px 3px 10px rgba(0,0,0,0.07);
-    margin-bottom: 10px;
-}
 </style>
 """, unsafe_allow_html=True)
 
-# ==============================
-# TÍTULO
-# ==============================
 st.title("📊 Auditoria FATURA x APEX")
 st.caption("Carregue os arquivos abaixo para iniciar a comparação.")
 st.divider()
 
+
 # ==============================
-# FUNÇÃO: Comparar dados (substitui a macro VBA)
+# FUNÇÕES AUXILIARES
 # ==============================
-def comparar_fatura_apex(df_fatura, df_apex):
+
+def converter_valor(valor):
+    """Replica ConverterValorParaNumero do VBA."""
+    try:
+        s = str(valor)
+        s = s.replace("R$", "").replace(" ", "").replace(".", "")
+        s = s.replace(",", ".")
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def limpar_codigo(valor):
+    """Remove .0 de inteiros lidos como float pelo pandas."""
+    s = str(valor).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def extrair_codigo_fatura(pat, serie):
     """
-    Replica a lógica da macro VBA CompararFaturaApex:
-    - Cruza FATURA e APEX pelo código/tombo
-    - Compara valores e classifica o status
+    Replica lógica do VBA:
+    1º usa PAT (col A); se vazio, usa Num Série (col C) só se for número puro.
     """
-    df_fatura = df_fatura.copy()
-    df_apex = df_apex.copy()
+    pat   = limpar_codigo(pat)   if pd.notna(pat)   else ""
+    serie = limpar_codigo(serie) if pd.notna(serie) else ""
 
-    # Padroniza nomes das colunas geradas pelo ler_fatura / ler_apex
-    df_fatura.columns = ["PAT", "Valor FATURA", "Num Série"]
-    df_apex.columns = ["Tombo", "Valor APEX"]
-
-    # Garante tipos string para o merge
-    df_fatura["PAT"] = df_fatura["PAT"].astype(str).str.strip()
-    df_apex["Tombo"] = df_apex["Tombo"].astype(str).str.strip()
-
-    # Merge pelo código
-    df_merged = pd.merge(
-        df_fatura,
-        df_apex,
-        left_on="PAT",
-        right_on="Tombo",
-        how="outer",
-        indicator=True
-    )
-
-    # Classifica o status
-    def classificar(row):
-        if row["_merge"] == "left_only":
-            return "Falta no APEX"
-        if row["_merge"] == "right_only":
-            return "Falta na FATURA"
+    if pat and pat not in ("", "nan", "0"):
         try:
-            fat = float(row["Valor FATURA"])
-            apex = float(row["Valor APEX"])
-            if abs(fat - apex) < 0.01:
-                return "Valores iguais"
-            else:
-                return "Divergente"
+            return str(int(float(pat)))
         except Exception:
-            return "Falta informação"
+            return pat
 
-    df_merged["Status"] = df_merged.apply(classificar, axis=1)
-    df_merged["Código"] = df_merged["PAT"].combine_first(df_merged["Tombo"])
+    if serie and serie not in ("", "nan", "0"):
+        if re.fullmatch(r"\d+", serie):
+            try:
+                return str(int(float(serie)))
+            except Exception:
+                return serie
 
-    # Reorganiza colunas
-    colunas = ["Código", "Num Série", "Valor FATURA", "Valor APEX", "Status"]
-    df_resultado = df_merged[[c for c in colunas if c in df_merged.columns]].copy()
-    df_resultado["Valor FATURA"] = pd.to_numeric(df_resultado["Valor FATURA"], errors="coerce")
-    df_resultado["Valor APEX"]   = pd.to_numeric(df_resultado["Valor APEX"],   errors="coerce")
-    df_resultado["Diferença"]    = df_resultado["Valor FATURA"] - df_resultado["Valor APEX"]
-
-    return df_resultado
+    return ""
 
 
-# ==============================
-# FUNÇÃO: Gerar Excel de saída
-# ==============================
+def comparar_fatura_apex(df_fatura, df_apex):
+    """Replica exatamente a macro VBA CompararFaturaApex."""
+
+    # Dicionário FATURA  (col A=PAT, col B=Tot Geral, col C=Num Série)
+    dict_fatura = {}
+    for _, row in df_fatura.iterrows():
+        pat   = row.iloc[0]
+        valor = row.iloc[1]
+        serie = row.iloc[2] if len(row) > 2 else ""
+        codigo = extrair_codigo_fatura(pat, serie)
+        if codigo:
+            dict_fatura[codigo] = converter_valor(valor)
+
+    # Dicionário APEX  (col A=Tombo, col B=Vr Loc)
+    dict_apex = {}
+    for _, row in df_apex.iterrows():
+        codigo = limpar_codigo(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
+        if codigo and codigo not in ("", "nan"):
+            dict_apex[codigo] = converter_valor(row.iloc[1])
+
+    # Comparação — mesma ordem do VBA
+    resultado = []
+    dict_apex_restante = dict(dict_apex)
+
+    for codigo, valor_f in dict_fatura.items():
+        if codigo in dict_apex_restante:
+            valor_a = dict_apex_restante.pop(codigo)
+            status  = "Valores iguais" if abs(valor_f - valor_a) < 0.01 else "Valores diferentes"
+        else:
+            valor_a = None
+            status  = "Só na Fatura Verificar APEX" if valor_f > 0 else "Só na FATURA"
+
+        resultado.append({
+            "Código":       codigo,
+            "Valor FATURA": valor_f,
+            "Valor APEX":   valor_a,
+            "Status":       status
+        })
+
+    # Sobras do APEX
+    for codigo, valor_a in dict_apex_restante.items():
+        resultado.append({
+            "Código":       codigo,
+            "Valor FATURA": None,
+            "Valor APEX":   valor_a,
+            "Status":       "Só na APEX"
+        })
+
+    return pd.DataFrame(resultado)
+
+
 def gerar_excel(df_resultado, df_fatura_raw, df_apex_raw):
-    wb = load_workbook(filename=io.BytesIO(b""))  # wb vazio
-    # Cria do zero com openpyxl puro
-    from openpyxl import Workbook
+    """Excel com abas Comparacao, FATURA e APEX — cores idênticas ao VBA."""
     wb = Workbook()
 
-    # ---- Aba RESULTADO ----
-    ws_res = wb.active
-    ws_res.title = "RESULTADO"
+    cores_hex = {
+        "Valores iguais":              "C6EFCE",
+        "Valores diferentes":          "FFC7CE",
+        "Só na FATURA":                "FFEB9C",
+        "Só na APEX":                  "FFEB9C",
+        "Só na Fatura Verificar APEX": "FFC000",
+    }
 
     header_fill = PatternFill("solid", fgColor="FF8C00")
     header_font = Font(bold=True, color="FFFFFF")
 
-    for col_idx, col_name in enumerate(df_resultado.columns, start=1):
-        cell = ws_res.cell(row=1, column=col_idx, value=col_name)
+    # Aba Comparacao
+    ws_res = wb.active
+    ws_res.title = "Comparacao"
+    colunas = ["Código", "Valor FATURA", "Valor APEX", "Status"]
+    for c, h in enumerate(colunas, 1):
+        cell = ws_res.cell(row=1, column=c, value=h)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center")
 
-    fill_igual      = PatternFill("solid", fgColor="EAFAF1")
-    fill_divergente = PatternFill("solid", fgColor="FDECEA")
-    fill_falta      = PatternFill("solid", fgColor="FEF9E7")
-
-    for r_idx, row in enumerate(df_resultado.itertuples(index=False), start=2):
-        status = getattr(row, "Status", "")
-        for c_idx, value in enumerate(row, start=1):
-            cell = ws_res.cell(row=r_idx, column=c_idx, value=value)
-            if status == "Valores iguais":
-                cell.fill = fill_igual
-            elif status == "Divergente":
-                cell.fill = fill_divergente
-            else:
-                cell.fill = fill_falta
+    for r, row in enumerate(df_resultado.itertuples(index=False), 2):
+        status = row.Status
+        fill   = PatternFill("solid", fgColor=cores_hex.get(status, "FFFFFF"))
+        for c, value in enumerate(row, 1):
+            cell = ws_res.cell(row=r, column=c, value=value)
+            if c == 4:
+                cell.fill = fill
 
     for col in ws_res.columns:
         max_len = max((len(str(c.value)) if c.value else 0) for c in col)
         ws_res.column_dimensions[col[0].column_letter].width = min(max_len + 4, 40)
 
-    # ---- Aba FATURA ----
+    # Aba FATURA
     ws_fat = wb.create_sheet("FATURA")
-    for col_idx, col_name in enumerate(["PAT", "Tot Geral", "Num Série"], start=1):
-        ws_fat.cell(row=1, column=col_idx, value=col_name).font = Font(bold=True)
-    for r_idx, row in enumerate(df_fatura_raw.itertuples(index=False), start=2):
-        for c_idx, value in enumerate(row, start=1):
-            ws_fat.cell(row=r_idx, column=c_idx, value=value)
+    for c, h in enumerate(["PAT", "Tot Geral", "Num Série"], 1):
+        ws_fat.cell(row=1, column=c, value=h).font = Font(bold=True)
+    for r, row in enumerate(df_fatura_raw.itertuples(index=False), 2):
+        for c, v in enumerate(row, 1):
+            ws_fat.cell(row=r, column=c, value=v)
 
-    # ---- Aba APEX ----
+    # Aba APEX
     ws_apex = wb.create_sheet("APEX")
-    for col_idx, col_name in enumerate(["Tombo", "Vr Loc"], start=1):
-        ws_apex.cell(row=1, column=col_idx, value=col_name).font = Font(bold=True)
-    for r_idx, row in enumerate(df_apex_raw.itertuples(index=False), start=2):
-        for c_idx, value in enumerate(row, start=1):
-            ws_apex.cell(row=r_idx, column=c_idx, value=value)
+    for c, h in enumerate(["Tombo", "Vr Loc"], 1):
+        ws_apex.cell(row=1, column=c, value=h).font = Font(bold=True)
+    for r, row in enumerate(df_apex_raw.itertuples(index=False), 2):
+        for c, v in enumerate(row, 1):
+            ws_apex.cell(row=r, column=c, value=v)
 
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    return buffer
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
 
 
 # ==============================
@@ -176,19 +204,15 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("#### 📄 Arquivo FATURA")
-    file_fatura = st.file_uploader(
-        "Selecione o arquivo da FATURA",
-        type=["xlsx", "xlsm", "xls"],
-        key="fatura"
-    )
+    st.caption("Colunas usadas: **A** = PAT · **B** = Tot Geral · **C** = Num Série")
+    file_fatura = st.file_uploader("Selecione o arquivo da FATURA",
+                                   type=["xlsx","xlsm","xls"], key="fatura")
 
 with col2:
     st.markdown("#### 📄 Arquivo APEX")
-    file_apex = st.file_uploader(
-        "Selecione o arquivo do APEX",
-        type=["xlsx", "xlsm"],
-        key="apex"
-    )
+    st.caption("Colunas usadas: **A** = Tombo · **B** = Vr Loc")
+    file_apex = st.file_uploader("Selecione o arquivo do APEX",
+                                 type=["xlsx","xlsm"], key="apex")
 
 st.divider()
 
@@ -197,99 +221,107 @@ st.divider()
 # ==============================
 if file_fatura and file_apex:
 
-    with st.spinner("Lendo arquivos e comparando dados..."):
+    with st.spinner("Comparando dados..."):
 
-        # Lê FATURA — colunas: B(idx1)=PAT, E(idx4)=Tot Geral, A(idx0)=Num Série
-        df_fat_raw_full = pd.read_excel(file_fatura, header=0)
-        df_fatura_dest = pd.DataFrame({
-            "PAT":       df_fat_raw_full.iloc[:, 1],
-            "Tot Geral": df_fat_raw_full.iloc[:, 4],
-            "Num Série": df_fat_raw_full.iloc[:, 0]
-        })
+        df_fat_full  = pd.read_excel(file_fatura, header=0)
+        df_fatura_dest = df_fat_full.iloc[:, [0, 1, 2]].copy()
+        df_fatura_dest.columns = ["PAT", "Tot Geral", "Num Série"]
 
-        # Lê APEX — colunas: I(idx8)=Tombo, K(idx10)=Vr Loc
-        df_apex_raw_full = pd.read_excel(file_apex, header=0)
-        df_apex_dest = pd.DataFrame({
-            "Tombo":  df_apex_raw_full.iloc[:, 8],
-            "Vr Loc": df_apex_raw_full.iloc[:, 10]
-        })
+        df_apex_full = pd.read_excel(file_apex, header=0)
+        df_apex_dest = df_apex_full.iloc[:, [0, 1]].copy()
+        df_apex_dest.columns = ["Tombo", "Vr Loc"]
 
-        # Executa comparação (substitui a macro VBA)
         df_resultado = comparar_fatura_apex(df_fatura_dest, df_apex_dest)
 
-    # ==============================
     # MÉTRICAS
-    # ==============================
     total      = len(df_resultado)
     iguais     = (df_resultado["Status"] == "Valores iguais").sum()
-    divergente = (df_resultado["Status"] == "Divergente").sum()
-    faltando   = total - iguais - divergente
+    diferentes = (df_resultado["Status"] == "Valores diferentes").sum()
+    so_fatura  = df_resultado["Status"].isin(["Só na FATURA","Só na Fatura Verificar APEX"]).sum()
+    so_apex    = (df_resultado["Status"] == "Só na APEX").sum()
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total de Registros", total)
-    m2.metric("✅ Valores Iguais",   iguais)
-    m3.metric("❌ Divergentes",      divergente)
-    m4.metric("⚠️ Com Pendência",    faltando)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Total",                  total)
+    m2.metric("✅ Valores Iguais",       iguais)
+    m3.metric("❌ Valores Diferentes",   diferentes)
+    m4.metric("⚠️ Só na FATURA",         so_fatura)
+    m5.metric("🔵 Só na APEX",           so_apex)
 
     st.divider()
 
-    # ==============================
+    # GRÁFICOS
+    cores_graf = {
+        "Valores iguais":              "#2ecc71",
+        "Valores diferentes":          "#e74c3c",
+        "Só na FATURA":                "#f39c12",
+        "Só na APEX":                  "#3498db",
+        "Só na Fatura Verificar APEX": "#e67e22",
+    }
+
+    colA, colB = st.columns(2)
+    with colA:
+        graf = df_resultado["Status"].value_counts().reset_index()
+        graf.columns = ["Status","Quantidade"]
+        fig = px.bar(graf, x="Status", y="Quantidade", color="Status",
+                     text="Quantidade", color_discrete_map=cores_graf,
+                     title="Distribuição de Status")
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with colB:
+        fig2 = px.scatter(
+            df_resultado.dropna(subset=["Valor FATURA","Valor APEX"]),
+            x="Valor FATURA", y="Valor APEX", color="Status",
+            color_discrete_map=cores_graf, hover_data=["Código"],
+            title="Comparação FATURA x APEX"
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.divider()
+
     # FILTROS
-    # ==============================
-    colA, colB = st.columns([2, 1])
-    busca  = colA.text_input("🔎 Buscar por Código")
-    status = colB.radio(
-        "Filtrar Status",
-        ["Todos"] + list(df_resultado["Status"].unique()),
-        horizontal=True
-    )
+    colF1, colF2 = st.columns([2, 2])
+    busca      = colF1.text_input("🔎 Buscar por Código")
+    status_sel = colF2.radio("Filtrar Status",
+                             ["Todos"] + sorted(df_resultado["Status"].unique().tolist()),
+                             horizontal=True)
 
     df_view = df_resultado.copy()
     if busca:
         df_view = df_view[df_view["Código"].astype(str).str.contains(busca, case=False)]
-    if status != "Todos":
-        df_view = df_view[df_view["Status"] == status]
+    if status_sel != "Todos":
+        df_view = df_view[df_view["Status"] == status_sel]
 
-    # ==============================
     # TABELA
-    # ==============================
-    def color_status(row):
-        if row["Status"] == "Valores iguais":
-            return ["background-color:#eafaf1"] * len(row)
-        if row["Status"] == "Divergente":
-            return ["background-color:#fdecea"] * len(row)
-        return ["background-color:#fef9e7"] * len(row)
+    cores_tabela = {
+        "Valores iguais":              "#eafaf1",
+        "Valores diferentes":          "#fdecea",
+        "Só na FATURA":                "#fef9e7",
+        "Só na APEX":                  "#eaf4fb",
+        "Só na Fatura Verificar APEX": "#fff3cd",
+    }
 
-    st.subheader("📋 Resultado da Auditoria")
-    st.dataframe(
-        df_view.style.apply(color_status, axis=1),
-        use_container_width=True,
-        height=500
-    )
+    def color_status(row):
+        cor = cores_tabela.get(row["Status"], "")
+        return [f"background-color:{cor}"] * len(row)
+
+    st.subheader("📋 Resultado da Comparação")
+    st.dataframe(df_view.style.apply(color_status, axis=1),
+                 use_container_width=True, height=500)
 
     st.divider()
 
-    # ==============================
     # DOWNLOADS
-    # ==============================
-    col_dl1, col_dl2 = st.columns(2)
-
-    with col_dl1:
-        st.download_button(
-            "📥 Baixar resultado (CSV)",
-            df_view.to_csv(index=False).encode("utf-8"),
-            file_name="auditoria_resultado.csv",
-            mime="text/csv"
-        )
-
-    with col_dl2:
-        excel_buffer = gerar_excel(df_resultado, df_fatura_dest, df_apex_dest)
-        st.download_button(
-            "📥 Baixar Excel completo (FATURA + APEX + RESULTADO)",
-            excel_buffer,
-            file_name="auditoria_completa.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button("📥 Baixar resultado (CSV)",
+                           df_view.to_csv(index=False).encode("utf-8"),
+                           file_name="auditoria_resultado.csv", mime="text/csv")
+    with dl2:
+        excel_buf = gerar_excel(df_resultado, df_fatura_dest, df_apex_dest)
+        st.download_button("📥 Baixar Excel completo (3 abas)", excel_buf,
+                           file_name="auditoria_completa.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 else:
     st.info("⬆️ Carregue os dois arquivos acima para iniciar a auditoria.")
