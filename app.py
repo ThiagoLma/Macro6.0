@@ -228,7 +228,7 @@ if file_fatura and file_apex:
         df_fatura_dest.columns = ["PAT", "Tot Geral", "Num Série"]
 
         df_apex_full = pd.read_excel(file_apex, header=0)
-        df_apex_dest = df_apex_full.iloc[:, [0, 1]].copy()
+        df_apex_dest = df_apex_full.iloc[:, [8, 10]].copy()  # col I=Tombo, col K=Vr Loc
         df_apex_dest.columns = ["Tombo", "Vr Loc"]
 
         df_resultado = comparar_fatura_apex(df_fatura_dest, df_apex_dest)
